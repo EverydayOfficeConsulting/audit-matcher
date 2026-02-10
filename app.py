@@ -9,12 +9,12 @@ from PIL import Image
 from difflib import SequenceMatcher
 
 def similar(a, b):
-    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+    return SequenceMatcher(None, str(a).lower(), str(b).lower()).ratio()
 
 st.set_page_config(page_title="EOCO Audit Matcher", layout="wide")
 
-st.title("📂 EOCO Audit Matcher v2.1")
-st.write("Flexible matching engine for messy CSVs.")
+st.title("📂 EOCO Audit Matcher v2.2")
+st.write("Enhanced Deep-Scan for better receipt matching.")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -24,59 +24,61 @@ with col2:
 
 if csv_file and zip_file:
     df = pd.read_csv(csv_file)
-    # Clean up column names: remove spaces and make lowercase
     df.columns = [str(c).strip().lower() for c in df.columns]
     
-    st.write("### 📋 CSV Preview")
-    st.dataframe(df.head())
-
-    # DYNAMIC COLUMN PICKER
-    # This helps the user if the app can't guess the right column
     potential_cols = df.columns.tolist()
-    default_amt = next((c for c in potential_cols if 'amt' in c or 'amount' in c or 'total' in c), potential_cols[0])
-    
-    selected_amt_col = st.selectbox("Which column contains the Dollar Amount?", potential_cols, index=potential_cols.index(default_amt))
+    default_amt = next((c for c in potential_cols if any(x in c for x in ['amt', 'amount', 'total'])), potential_cols[0])
+    selected_amt_col = st.selectbox("Confirm the Amount column:", potential_cols, index=potential_cols.index(default_amt))
 
-    if st.button("🚀 Run Matching Engine"):
+    if st.button("🚀 Run Deep-Scan Matching"):
         matches = []
         unmatched_pdfs = []
         
         with zipfile.ZipFile(zip_file, 'r') as z:
             pdf_files = [f for f in z.namelist() if f.lower().endswith('.pdf')]
-            my_bar = st.progress(0, text="Reading receipts...")
+            my_bar = st.progress(0)
 
             for i, filename in enumerate(pdf_files):
                 with z.open(filename) as f:
-                    pdf_bytes = f.read()
                     try:
-                        images = convert_from_bytes(pdf_bytes)
+                        images = convert_from_bytes(f.read())
                         full_text = ""
                         for img in images:
-                            full_text += pytesseract.image_to_string(img)
+                            # Use custom config to tell Tesseract to look for digits/currency patterns
+                            full_text += pytesseract.image_to_string(img, config='--psm 11')
                         
-                        clean_text = full_text.replace('\n', ' ').upper()
-                        found_amounts = re.findall(r"\d+\.\d{2}", full_text)
+                        # CLEANING: Remove spaces between digits and decimals (e.g., "150 . 00" -> "150.00")
+                        cleaned_text = re.sub(r'(\d)\s+\.\s+(\d)', r'\1.\2', full_text)
+                        # Remove common OCR errors (S instead of 5, O instead of 0) in number-like contexts
+                        # (Keeping it simple for now to avoid breaking genuine text)
                         
+                        # Find all patterns that look like currency (1.00, 1,000.00, etc)
+                        found_amounts = re.findall(r"(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)", cleaned_text)
+                        
+                        # Clean found amounts (remove commas) and convert to float
+                        parsed_amounts = []
+                        for a in found_amounts:
+                            try:
+                                val = float(a.replace(',', ''))
+                                if val > 0: parsed_amounts.append(val)
+                            except: continue
+
                         found_match = False
-                        for amt_str in set(found_amounts):
-                            amt_val = float(amt_str)
-                            
-                            # Use the user-selected column for matching
-                            row_match = df[df[selected_amt_col] == amt_val]
+                        for amt_val in set(parsed_amounts):
+                            # Try an exact match
+                            row_match = df[df[selected_amt_col].astype(float) == amt_val]
                             
                             if not row_match.empty:
                                 for _, row in row_match.iterrows():
-                                    # Try to find a vendor or description column
-                                    csv_vendor = str(row.get('vendor', row.get('description', row.get('memo', 'Unknown')))).upper()
-                                    name_score = similar(csv_vendor, clean_text)
-                                    status = "✅ Confident Match" if name_score > 0.4 else "❓ Amount Match Only"
+                                    csv_vendor = str(row.get('vendor', row.get('description', 'Unknown'))).upper()
+                                    name_score = similar(csv_vendor, cleaned_text)
                                     
                                     matches.append({
                                         "Receipt": filename,
-                                        "Amount": amt_val,
-                                        "CSV Vendor": csv_vendor,
-                                        "Match Confidence": f"{int(name_score * 100)}%",
-                                        "Result": status
+                                        "Amount Found": f"${amt_val:.2f}",
+                                        "CSV Transaction": csv_vendor,
+                                        "Date": row.get('date', 'N/A'),
+                                        "Confidence": f"{int(name_score * 100)}%"
                                     })
                                 found_match = True
                         
@@ -84,19 +86,16 @@ if csv_file and zip_file:
                             unmatched_pdfs.append(filename)
                             
                     except Exception as e:
-                        st.warning(f"Error reading {filename}: {e}")
+                        st.warning(f"Skipped {filename}: {e}")
                 
                 my_bar.progress((i + 1) / len(pdf_files))
 
-        st.divider()
         if matches:
-            st.success(f"Processing complete. Found {len(matches)} matches.")
-            res_df = pd.DataFrame(matches).sort_values(by="Match Confidence", ascending=False)
-            st.table(res_df)
+            st.success(f"Matched {len(matches)} items!")
+            st.table(pd.DataFrame(matches))
+        else:
+            st.error("No matches found. This is often due to low-resolution PDFs or unusual CSV formats.")
             
-            csv_report = res_df.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Download Audit Report", csv_report, "audit_report.csv")
-        
         if unmatched_pdfs:
-            with st.expander("⚠️ Unmatched Receipts"):
+            with st.expander("View Unmatched Files"):
                 st.write(unmatched_pdfs)
