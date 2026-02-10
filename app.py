@@ -1,108 +1,94 @@
 import streamlit as st
 import pandas as pd
 import zipfile
-import re
-from pdf2image import convert_from_bytes
-import pytesseract
-import io
-from PIL import Image
-from difflib import SequenceMatcher
+import base64
+from io import BytesIO
+from pypdf import PdfWriter, PdfReader
 
-def similar(a, b):
-    return SequenceMatcher(None, str(a).lower(), str(b).lower()).ratio()
+st.set_page_config(page_title="EOCO Review Station", layout="wide")
 
-st.set_page_config(page_title="EOCO Audit Matcher", layout="wide")
+st.title("📑 EOCO Review Station")
+st.write("Manual matching with automatic PDF compilation.")
 
-st.title("📂 EOCO Audit Matcher v2.3")
-st.write("Now with comma-handling and OCR Debug Mode.")
+# Session State Initialization
+if 'current_idx' not in st.session_state:
+    st.session_state.current_idx = 0
+if 'matches' not in st.session_state:
+    st.session_state.matches = {}
 
-# Sidebar for Settings
-with st.sidebar:
-    st.header("Settings")
-    debug_mode = st.checkbox("Enable OCR Debug Mode", value=False, help="Shows you the raw text read from each receipt.")
-
+# 1. File Uploads
 col1, col2 = st.columns(2)
 with col1:
-    csv_file = st.file_uploader("1. Upload Transaction CSV", type="csv")
+    csv_file = st.file_uploader("Upload CSV", type="csv")
 with col2:
-    zip_file = st.file_uploader("2. Upload Receipts ZIP", type="zip")
+    zip_file = st.file_uploader("Upload Receipts ZIP", type="zip")
 
 if csv_file and zip_file:
     df = pd.read_csv(csv_file)
     df.columns = [str(c).strip().lower() for c in df.columns]
     
-    potential_cols = df.columns.tolist()
-    default_amt = next((c for c in potential_cols if any(x in c for x in ['amt', 'amount', 'total'])), potential_cols[0])
-    selected_amt_col = st.selectbox("Confirm the Amount column:", potential_cols, index=potential_cols.index(default_amt))
-
-    if st.button("🚀 Run Deep-Scan Matching"):
-        matches = []
-        unmatched_pdfs = []
+    with zipfile.ZipFile(zip_file, 'r') as z:
+        pdf_names = [f for f in z.namelist() if f.lower().endswith('.pdf')]
         
-        # Clean CSV amounts (remove currency symbols and commas if they are strings)
-        df[selected_amt_col] = df[selected_amt_col].astype(str).str.replace(r'[$,]', '', regex=True).astype(float)
+        # UI Layout
+        left_col, right_col = st.columns([1, 1])
         
-        with zipfile.ZipFile(zip_file, 'r') as z:
-            pdf_files = [f for f in z.namelist() if f.lower().endswith('.pdf')]
-            my_bar = st.progress(0)
-
-            for i, filename in enumerate(pdf_files):
-                with z.open(filename) as f:
-                    try:
-                        images = convert_from_bytes(f.read())
-                        full_text = ""
-                        for img in images:
-                            full_text += pytesseract.image_to_string(img, config='--psm 11')
-                        
-                        # Fix decimal spacing (e.g., "150 . 00" -> "150.00")
-                        cleaned_text = re.sub(r'(\d)\s+\.\s+(\d)', r'\1.\2', full_text)
-                        
-                        if debug_mode:
-                            with st.expander(f"DEBUG: Raw Text for {filename}"):
-                                st.code(cleaned_text)
-                        
-                        # Find potential currency patterns
-                        found_amounts = re.findall(r"(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)", cleaned_text)
-                        
-                        parsed_amounts = []
-                        for a in found_amounts:
-                            try:
-                                # THE FIX: Remove commas before converting to float
-                                val = float(a.replace(',', ''))
-                                if val > 0: parsed_amounts.append(val)
-                            except: continue
-
-                        found_match = False
-                        for amt_val in set(parsed_amounts):
-                            row_match = df[df[selected_amt_col] == amt_val]
-                            
-                            if not row_match.empty:
-                                for _, row in row_match.iterrows():
-                                    csv_vendor = str(row.get('vendor', row.get('description', 'Unknown'))).upper()
-                                    name_score = similar(csv_vendor, cleaned_text)
-                                    
-                                    matches.append({
-                                        "Receipt": filename,
-                                        "Amount Found": f"${amt_val:,.2f}",
-                                        "CSV Transaction": csv_vendor,
-                                        "Confidence": f"{int(name_score * 100)}%"
-                                    })
-                                found_match = True
-                        
-                        if not found_match:
-                            unmatched_pdfs.append(filename)
-                            
-                    except Exception as e:
-                        st.error(f"Error on {filename}: {e}")
-                
-                my_bar.progress((i + 1) / len(pdf_files))
-
-        if matches:
-            st.success(f"Matched {len(matches)} items!")
-            st.table(pd.DataFrame(matches))
-        else:
-            st.error("No matches found.")
+        # LEFT: Transaction Details
+        with left_col:
+            st.header(f"Transaction {st.session_state.current_idx + 1} of {len(df)}")
+            row = df.iloc[st.session_state.current_idx]
             
-        if unmatched_pdfs:
-            with st.expander("View Unmatched Files"):
-                st.write(unmatched_pdfs)
+            # Display transaction as a nice card
+            st.info(f"""
+            **Vendor:** {row.get('vendor', row.get('description', 'N/A'))}  
+            **Date:** {row.get('date', 'N/A')}  
+            **Amount:** ${row.get('amount', row.get('total', 0.0))}
+            """)
+            
+            selected_pdf = st.selectbox("Select Matching Receipt:", ["None"] + pdf_names)
+            
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("✅ Match & Next"):
+                    if selected_pdf != "None":
+                        st.session_state.matches[st.session_state.current_idx] = selected_pdf
+                    if st.session_state.current_idx < len(df) - 1:
+                        st.session_state.current_idx += 1
+                        st.rerun()
+            with col_b:
+                if st.button("➡️ Skip"):
+                    if st.session_state.current_idx < len(df) - 1:
+                        st.session_state.current_idx += 1
+                        st.rerun()
+            
+            if st.button("🔄 Reset Progress"):
+                st.session_state.current_idx = 0
+                st.session_state.matches = {}
+                st.rerun()
+
+        # RIGHT: PDF Preview
+        with right_col:
+            if selected_pdf != "None":
+                with z.open(selected_pdf) as f:
+                    base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+                    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600" type="application/pdf"></iframe>'
+                    st.markdown(pdf_display, unsafe_allow_html=True)
+            else:
+                st.warning("Select a PDF from the dropdown to preview it here.")
+
+    # 2. FINAL COMPILATION
+    st.divider()
+    if st.button("🎁 Generate Final Audit PDF"):
+        if not st.session_state.matches:
+            st.error("No matches made yet.")
+        else:
+            merger = PdfWriter()
+            with zipfile.ZipFile(zip_file, 'r') as z:
+                for idx, pdf_name in st.session_state.matches.items():
+                    with z.open(pdf_name) as f:
+                        merger.append(PdfReader(f))
+            
+            output = BytesIO()
+            merger.write(output)
+            st.success("Audit PDF Compiled Successfully!")
+            st.download_button("📥 Download Combined Audit PDF", output.getvalue(), "EOCO_Audit_Package.pdf", "application/pdf")
