@@ -2,3 +2,4 @@ streamlit
 pandas
 pytesseract
 pdf2image
+pypdf
