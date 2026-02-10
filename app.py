@@ -8,9 +8,9 @@ from pypdf import PdfWriter, PdfReader
 st.set_page_config(page_title="EOCO Review Station", layout="wide")
 
 st.title("📑 EOCO Review Station")
-st.write("Manual matching with intelligent search and compilation.")
+st.write("Visual verification and audit compilation.")
 
-# Session State Initialization
+# Session State to track progress
 if 'current_idx' not in st.session_state:
     st.session_state.current_idx = 0
 if 'matches' not in st.session_state:
@@ -30,15 +30,15 @@ if csv_file and zip_file:
     with zipfile.ZipFile(zip_file, 'r') as z:
         pdf_names = sorted([f for f in z.namelist() if f.lower().endswith('.pdf')])
         
-        # UI Layout
-        left_col, right_col = st.columns([1, 1.2])
+        # UI Layout: 40% Control Panel / 60% PDF Preview
+        left_col, right_col = st.columns([2, 3])
         
-        # LEFT: Transaction Details
+        # LEFT: Transaction Details & Controls
         with left_col:
-            st.header(f"Transaction {st.session_state.current_idx + 1} of {len(df)}")
+            st.subheader(f"Transaction {st.session_state.current_idx + 1} of {len(df)}")
             row = df.iloc[st.session_state.current_idx]
             
-            # Display transaction details prominently
+            # Highlighted Transaction Data
             vendor_name = row.get('vendor', row.get('description', 'N/A'))
             st.info(f"""
             **Vendor:** {vendor_name}  
@@ -46,62 +46,66 @@ if csv_file and zip_file:
             **Amount:** ${row.get('amount', row.get('total', 0.0))}
             """)
             
-            # Searchable Dropdown Logic
-            search_query = st.text_input("🔍 Search Receipts:", value="", help="Type vendor name or file name to filter...")
+            # Search & Filter Receipts
+            search_query = st.text_input("🔍 Search Receipts:", placeholder="Type to filter files...")
             filtered_pdfs = [p for p in pdf_names if search_query.lower() in p.lower()]
             
-            selected_pdf = st.selectbox("Select Match:", ["None"] + filtered_pdfs)
+            selected_pdf = st.selectbox("Select Receipt to View:", ["-- Select a File --"] + filtered_pdfs)
+            
+            st.divider()
             
             col_a, col_b = st.columns(2)
             with col_a:
-                if st.button("✅ Match & Next"):
-                    if selected_pdf != "None":
+                if st.button("✅ Match & Next", use_container_width=True):
+                    if selected_pdf != "-- Select a File --":
                         st.session_state.matches[st.session_state.current_idx] = selected_pdf
-                    if st.session_state.current_idx < len(df) - 1:
-                        st.session_state.current_idx += 1
-                        st.rerun()
+                        if st.session_state.current_idx < len(df) - 1:
+                            st.session_state.current_idx += 1
+                            st.rerun()
+                    else:
+                        st.warning("Please select a PDF first.")
             with col_b:
-                if st.button("➡️ Skip"):
+                if st.button("➡️ Skip Transaction", use_container_width=True):
                     if st.session_state.current_idx < len(df) - 1:
                         st.session_state.current_idx += 1
                         st.rerun()
             
-            st.write(f"**Total Matches Made:** {len(st.session_state.matches)}")
-            if st.button("🔄 Reset All Progress"):
+            st.write(f"📊 **Progress:** {len(st.session_state.matches)} matched")
+            if st.button("🔄 Reset All Matches"):
                 st.session_state.current_idx = 0
                 st.session_state.matches = {}
                 st.rerun()
 
-        # RIGHT: PDF Preview
+        # RIGHT: Live PDF Viewer
         with right_col:
-            if selected_pdf != "None":
+            if selected_pdf != "-- Select a File --":
                 with z.open(selected_pdf) as f:
+                    # Convert PDF bytes to a format the browser can display in an iframe
                     base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-                    # Iframe for smooth browser preview
-                    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}#toolbar=0" width="100%" height="700" type="application/pdf"></iframe>'
+                    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800" type="application/pdf"></iframe>'
                     st.markdown(pdf_display, unsafe_allow_html=True)
             else:
-                st.warning("Use the search or select a PDF to preview it here.")
+                st.info("The selected receipt will appear here for verification.")
 
     # 2. FINAL COMPILATION
     st.divider()
-    if st.button("🎁 Compile & Export Final Audit PDF"):
+    if st.button("🎁 Export Combined Audit Package"):
         if not st.session_state.matches:
-            st.error("You haven't matched any transactions yet.")
+            st.error("No matches have been recorded yet.")
         else:
-            with st.spinner("Merging PDFs into audit-ready package..."):
+            with st.spinner("Generating PDF..."):
                 merger = PdfWriter()
                 with zipfile.ZipFile(zip_file, 'r') as z:
+                    # Sort by index to keep the PDF in the same order as your CSV
                     for idx, pdf_name in sorted(st.session_state.matches.items()):
                         with z.open(pdf_name) as f:
                             merger.append(PdfReader(f))
                 
                 output = BytesIO()
                 merger.write(output)
-                st.success(f"Successfully compiled {len(st.session_state.matches)} receipts!")
                 st.download_button(
-                    label="📥 Download Audit Package",
+                    label="📥 Download Audit PDF",
                     data=output.getvalue(),
-                    file_name="EOCO_Audit_Report.pdf",
+                    file_name="EOCO_Compiled_Receipts.pdf",
                     mime="application/pdf"
                 )
